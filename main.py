@@ -15,9 +15,16 @@ header = {
     'Authorization': 'Bearer {}'.format(ACCESS_TOKEN)
 }
 
-res = requests.get('https://api.genius.com/artists/16775/songs?sort=popularity&per_page=10',
+artist_id = 16775
+
+res = requests.get(f'https://api.genius.com/artists/{artist_id}',
     headers = header)
 
-print(res.json())
+artist_name = res.json()['response']['artist']['name']
+
+res = requests.get(f'https://api.genius.com/artists/{artist_id}/songs?sort=popularity&per_page=10',
+    headers = header)
+
+print(res.json()['response'])
 
 transaction_id = uuid.uuid4()
