@@ -2,17 +2,18 @@
 
 import json
 import uuid
-import os
 import requests
 import boto3
 import redis
 
+from os import getenv
+from distutils.util import strtobool
 from botocore.exceptions import ClientError
-from flask import Flask
+from flask import Flask, request
 
-ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
-DYNAMO_ENDPOINT = os.getenv('DYNAMO_ENDPOINT')
-REDIS_PORT = os.getenv('REDIS_PORT')
+ACCESS_TOKEN = getenv('ACCESS_TOKEN')
+DYNAMO_ENDPOINT = getenv('DYNAMO_ENDPOINT')
+REDIS_PORT = getenv('REDIS_PORT')
 
 # SIA: 16775
 
@@ -116,18 +117,18 @@ def retrieve_external_response(artist_id):
 
 
 # Cache expires in 7 days (604800 secs)
-def cache_data(redis_db, response, expiration = 604800):
+def cache_songs(redis_db, response, expiration = 604800):
     redis_db.setex('top_songs_' + response['artist_id'], expiration, json.dumps(response))
 
 
 ###### Main app ######
 app = Flask(__name__)
 
-dynamodb = boto3.resource(
-    'dynamodb',
-    endpoint_url=DYNAMO_ENDPOINT)
+#dynamodb = boto3.resource(
+#    'dynamodb',
+#    endpoint_url=DYNAMO_ENDPOINT)
 
-create_songs_table(dynamodb)
+#create_songs_table(dynamodb)
 
 @app.get('/')
 def index():
@@ -138,30 +139,50 @@ def index():
 def top_songs(artist_id):
     redis_db = redis.Redis(port=REDIS_PORT)
 
-    # Data is cached
-    if redis_db.exists('top_songs_' + artist_id):
-        response = redis_db.get('top_songs_' + artist_id).decode()
-        return response
+    # Get query string and convert it to boolean
+    use_cache = bool(strtobool(request.args.get('cache', default='true')))
+   
+    if use_cache:
+        # Data is cached
+        if redis_db.exists('top_songs_' + artist_id):
+            print('Using cached data.')
+
+            response = redis_db.get('top_songs_' + artist_id).decode()
+            return response
+
+        # Try retrieving data locally
+        try:
+            print('Trying to retrieve information locally.')
+
+            #dynamodb = boto3.resource('dynamodb', endpoint_url=DYNAMO_ENDPOINT)
+            #table = dynamodb.Table('popular_songs')
+            #response = table.get_item(Key={'artist_id': artist_id})
+            #response = response['Item']
+            #cache_data(redis_db, response)
+            #return json.dumps(response)
+
+            # This is used only when dynamoDB is unavailable, otherwise comment this
+            raise ClientError({'message': 'DynamoDB unavailable'}, -1)
+
+        # Data is neither cached nor locally available
+        except ClientError:
+            print('Local database retrieval failed. Retrieving external information.')
+            response = retrieve_external_response(artist_id)
+
+            #persist_songs(
+            #    response['transaction_id'], response['artist_id'],
+            #    response['artist_name'], response['artist_songs'])
+
+            cache_songs(redis_db, response)
+
+            return json.dumps(response)
     
-    dynamodb = boto3.resource('dynamodb', endpoint_url=DYNAMO_ENDPOINT)
-    table = dynamodb.Table('popular_songs')
-
-    # Try retrieving data locally
-    try:
-        response = table.get_item(Key={'artist_id': artist_id})
-        response = response['Item']
-        cache_data(redis_db, response)
-        return json.dumps(response)
-
-    # Data is neither cached nor locally available
-    except ClientError:
-        print('Database retrieval failed. Retrieving external information')
+    else:
+        print('Cache disabled. Retrieving external information')
         response = retrieve_external_response(artist_id)
 
-        persist_songs(
-            response['transaction_id'], response['artist_id'],
-            response['artist_name'], response['artist_songs'])
-
-        cache_data(redis_db, response)
+        #persist_songs(
+        #    response['transaction_id'], response['artist_id'],
+        #    response['artist_name'], response['artist_songs'])
 
         return json.dumps(response)
