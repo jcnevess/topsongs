@@ -7,14 +7,14 @@ import requests
 import boto3
 import redis
 
-from botocore.exceptions import ClientError 
-from oauthlib.oauth2 import WebApplicationClient
+from botocore.exceptions import ClientError
 from flask import Flask
 
-CLIENT_ID = os.getenv('CLIENT_ID')
 ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
 DYNAMO_ENDPOINT = os.getenv('DYNAMO_ENDPOINT')
 REDIS_PORT = os.getenv('REDIS_PORT')
+
+# SIA: 16775
 
 def create_songs_table(dynamodb = None):
     if not dynamodb:
@@ -23,37 +23,37 @@ def create_songs_table(dynamodb = None):
 
     try:
         table = dynamodb.create_table(
-            TableName='PopularSongs',
+            TableName='popular_songs',
             KeySchema=[
                 {
-                    'AttributeName': 'TransactionID',
+                    'AttributeName': 'artist_id',
                     'KeyType': 'HASH' # Partition key
                 }
             ],
             AttributeDefinitions=[
                 {
-                    'AttributeName': 'TransactionID',
+                    'AttributeName': 'transaction_id',
                     'AttributeType': 'S'
                 },
                                 {
-                    'AttributeName': 'ArtistID',
+                    'AttributeName': 'artist_id',
                     'AttributeType': 'S'
                 },
                                 {
-                    'AttributeName': 'ArtistName',
+                    'AttributeName': 'artist_name',
                     'AttributeType': 'S'
                 },
                 {
-                    'AttributeName': 'ArtistSongs',
+                    'AttributeName': 'artist_songs',
                     'AttributeType': 'B'
                 }
             ],
             ProvisionedThroughput={
-                'ReadCapacityUnits': 1,
-                'WriteCapacityUnits': 1
+                'ReadCapacityUnits': 3,
+                'WriteCapacityUnits': 3
             },
             BillingMode="PAY_PER_REQUEST"
-        )    
+        )
 
     except ClientError as err:
         # Table already exists
@@ -65,32 +65,29 @@ def create_songs_table(dynamodb = None):
     return table
 
 
-def put_songs(transaction_id, artist_id, artist_name, artist_songs, dynamodb = None):
+def persist_songs(transaction_id, artist_id, artist_name, artist_songs, dynamodb = None):
     if not dynamodb:
         dynamodb = boto3.resource(
             'dynamodb', endpoint_url=DYNAMO_ENDPOINT)
- 
-    table = dynamodb.Table('PopularSongs')
+
+    table = dynamodb.Table('popular_songs')
     response = table.put_item(
         Item={
-            'TransactionID': transaction_id,
-            'ArtistID': artist_id,
-            'ArtistName': artist_name,
-            'ArtistSongs': artist_songs
+            'transaction_id': transaction_id,
+            'artist_id': artist_id,
+            'artist_name': artist_name,
+            'artist_songs': artist_songs
         }
     )
     return response
 
 
-# TODO: Do/call all authentication here
-# SIA: 16775
-def prepare_response(artist_id):
-    client = WebApplicationClient(CLIENT_ID)
-
+def retrieve_external_response(artist_id):
     header = {
         'Authorization': f'Bearer {ACCESS_TOKEN}'
     }
 
+    # The only way to get artist names accurately is making this call
     res = requests.get(f'https://api.genius.com/artists/{artist_id}',
         headers = header)
 
@@ -103,6 +100,7 @@ def prepare_response(artist_id):
     res_data = res.text.replace('\xa0', ' ')
 
     res_data = json.loads(res_data)
+
     artist_songs = res_data['response']['songs']
 
     transaction_id = str(uuid.uuid4())
@@ -117,31 +115,53 @@ def prepare_response(artist_id):
     return response
 
 
+# Cache expires in 7 days (604800 secs)
+def cache_data(redis_db, response, expiration = 604800):
+    redis_db.setex('top_songs_' + response['artist_id'], expiration, json.dumps(response))
+
+
+###### Main app ######
 app = Flask(__name__)
 
-#dynamodb = boto3.resource(
-#    'dynamodb',
-#    endpoint_url=DYNAMO_ENDPOINT)
+dynamodb = boto3.resource(
+    'dynamodb',
+    endpoint_url=DYNAMO_ENDPOINT)
 
-# create_songs_table(dynamodb)
+create_songs_table(dynamodb)
 
 @app.get('/')
 def index():
     return 'Welcome to the Top Songs API. Try using /topsongs/<artist_code>'
 
+
 @app.get('/topsongs/<artist_id>')
 def top_songs(artist_id):
-    response = prepare_response(artist_id)
-
-    #put_songs(
-    #    response['transaction_id'], response['artist_id'],
-    #    response['artist_name'], response['artist_songs'])
-    
-    # TODO: Make this configurable
     redis_db = redis.Redis(port=REDIS_PORT)
 
-    REDIS_EXPIRATION = 604800 # 7 days
+    # Data is cached
+    if redis_db.exists('top_songs_' + artist_id):
+        response = redis_db.get('top_songs_' + artist_id).decode()
+        return response
+    
+    dynamodb = boto3.resource('dynamodb', endpoint_url=DYNAMO_ENDPOINT)
+    table = dynamodb.Table('popular_songs')
 
-    redis_db.setex('top_songs_' + response['artist_id'], REDIS_EXPIRATION, json.dumps(response))
+    # Try retrieving data locally
+    try:
+        response = table.get_item(Key={'artist_id': artist_id})
+        response = response['Item']
+        cache_data(redis_db, response)
+        return json.dumps(response)
 
-    return json.dumps(response)
+    # Data is neither cached nor locally available
+    except ClientError:
+        print('Database retrieval failed. Retrieving external information')
+        response = retrieve_external_response(artist_id)
+
+        persist_songs(
+            response['transaction_id'], response['artist_id'],
+            response['artist_name'], response['artist_songs'])
+
+        cache_data(redis_db, response)
+
+        return json.dumps(response)
