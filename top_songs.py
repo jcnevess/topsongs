@@ -5,19 +5,23 @@ import uuid
 import os
 import requests
 import boto3
+import redis
 
+from botocore.exceptions import ClientError 
 from oauthlib.oauth2 import WebApplicationClient
 from flask import Flask
 
 CLIENT_ID = os.getenv('CLIENT_ID')
 ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
-ENDPOINT_URL = os.getenv('ENDPOINT_URL')
+DYNAMO_ENDPOINT = os.getenv('DYNAMO_ENDPOINT')
+REDIS_PORT = os.getenv('REDIS_PORT')
 
 def create_songs_table(dynamodb = None):
     if not dynamodb:
         dynamodb = boto3.resource(
-            'dynamodb', endpoint_url=ENDPOINT_URL)
+            'dynamodb', endpoint_url=DYNAMO_ENDPOINT)
 
+    try:
         table = dynamodb.create_table(
             TableName='PopularSongs',
             KeySchema=[
@@ -41,22 +45,30 @@ def create_songs_table(dynamodb = None):
                 },
                 {
                     'AttributeName': 'ArtistSongs',
-                    'AttributeType': 'L'
+                    'AttributeType': 'B'
                 }
             ],
             ProvisionedThroughput={
                 'ReadCapacityUnits': 1,
                 'WriteCapacityUnits': 1
-            }
+            },
+            BillingMode="PAY_PER_REQUEST"
         )    
 
-        return table
+    except ClientError as err:
+        # Table already exists
+        if err.response["Error"]["Code"] == 'ResourceInUseException':
+            pass
+        else:
+            raise err
+
+    return table
 
 
 def put_songs(transaction_id, artist_id, artist_name, artist_songs, dynamodb = None):
     if not dynamodb:
         dynamodb = boto3.resource(
-            'dynamodb', endpoint_url=ENDPOINT_URL)
+            'dynamodb', endpoint_url=DYNAMO_ENDPOINT)
  
     table = dynamodb.Table('PopularSongs')
     response = table.put_item(
@@ -109,16 +121,27 @@ app = Flask(__name__)
 
 #dynamodb = boto3.resource(
 #    'dynamodb',
-#    endpoint_url=ENDPOINT_URL)
+#    endpoint_url=DYNAMO_ENDPOINT)
 
-# TODO: Check if it exists before creation
 # create_songs_table(dynamodb)
 
 @app.get('/')
 def index():
-    return 'Welcome to the Top Songs API. Try using /topsongs/:id'
+    return 'Welcome to the Top Songs API. Try using /topsongs/<artist_code>'
 
-@app.get('/topsongs/<song_id>')
-def top_songs(song_id):
-    return json.dumps(prepare_response(song_id))
+@app.get('/topsongs/<artist_id>')
+def top_songs(artist_id):
+    response = prepare_response(artist_id)
+
+    #put_songs(
+    #    response['transaction_id'], response['artist_id'],
+    #    response['artist_name'], response['artist_songs'])
     
+    # TODO: Make this configurable
+    redis_db = redis.Redis(port=REDIS_PORT)
+
+    REDIS_EXPIRATION = 604800 # 7 days
+
+    redis_db.setex('top_songs_' + response['artist_id'], REDIS_EXPIRATION, json.dumps(response))
+
+    return json.dumps(response)
