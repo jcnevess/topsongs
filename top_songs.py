@@ -121,7 +121,7 @@ def cache_songs(redis_db, response, expiration = 604800):
     redis_db.setex('top_songs_' + response['artist_id'], expiration, json.dumps(response))
 
 
-###### Main app ######
+################# MAIN APP ##################
 app = Flask(__name__)
 
 #dynamodb = boto3.resource(
